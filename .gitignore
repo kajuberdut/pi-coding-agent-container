@@ -1,0 +1,10 @@
+/.pi-data/*
+!/.pi-data/.gitkeep
+/workspace/*
+!/workspace/.gitkeep
+/models/*
+!/models/.gitkeep
+.env
+experiments
+dev
+github_token.txt

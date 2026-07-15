@@ -1,0 +1,46 @@
+# syntax=docker/dockerfile:1
+
+# --- Base Stage: Install system dependencies ---
+FROM node:26-trixie-slim AS base
+
+ENV NODE_ENV=production
+ENV DEBIAN_FRONTEND=noninteractive
+ENV NPM_CONFIG_LOGLEVEL=warn
+ENV HOME=/home/node
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    procps \
+    build-essential \
+    python3 \
+    python3-dev \
+    git \
+    gh \
+    fd-find \
+    ripgrep \
+    && ln -s /usr/bin/fdfind /usr/bin/fd \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- Release Stage: Setup application and workspace ---
+FROM base AS release
+
+# Install the agent globally
+RUN npm install -g @earendil-works/pi-coding-agent
+
+# Create required directories and ensure correct ownership for the unprivileged user
+RUN mkdir -p /home/node/.pi/agent \
+    /workspace \
+    /home/node/.config \
+    /home/node/.npm \
+    && chown -R node:node /home/node/.pi \
+    /workspace \
+    /home/node/.config \
+    /home/node/.npm
+
+WORKDIR /workspace
+
+# Switch to the unprivileged node user for execution
+USER node
+
+ENTRYPOINT ["pi"]
+CMD []
+

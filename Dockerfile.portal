@@ -1,0 +1,9 @@
+FROM tsl0922/ttyd:latest
+
+# Install the Docker CLI to execute commands via the mounted socket
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    docker.io \
+    && rm -rf /var/lib/apt/lists/*
+
+# Expose the default ttyd port
+EXPOSE 7681

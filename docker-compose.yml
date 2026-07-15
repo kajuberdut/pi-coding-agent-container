@@ -1,0 +1,128 @@
+services:
+  pi-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    image: local/pi-coding-agent:latest
+    container_name: pi_coding_agent
+    
+    tty: true
+    stdin_open: true
+
+    # Keep container alive in the background when started via docker compose up.
+    # manage.sh run will override this entrypoint to execute the pi CLI.
+    entrypoint: ["tail", "-f", "/dev/null"]
+
+    environment:
+      - HOME=/home/node
+      - HOST_UID=${HOST_UID:-1000}
+      - HOST_GID=${HOST_GID:-1000}
+      # Git Identity Configuration (pulled from .env)
+      - GIT_AUTHOR_NAME=${GIT_AUTHOR_NAME:-}
+      - GIT_AUTHOR_EMAIL=${GIT_AUTHOR_EMAIL:-}
+      - GIT_COMMITTER_NAME=${GIT_COMMITTER_NAME:-}
+      - GIT_COMMITTER_EMAIL=${GIT_COMMITTER_EMAIL:-}
+
+    volumes:
+      - ./workspace:/workspace
+      - ./.pi-data:/home/node/.pi
+      
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    read_only: true
+
+    tmpfs:
+      - /tmp:noexec,nodev,nosuid,mode=1777
+      - /home/node/.config:uid=${HOST_UID:-1000},gid=${HOST_GID:-1000},mode=700,noexec,nodev,nosuid
+      - /home/node/.npm:uid=${HOST_UID:-1000},gid=${HOST_GID:-1000},mode=700,noexec,nodev,nosuid
+
+    pids_limit: 150
+
+    networks:
+      - internal_network
+
+
+    restart: unless-stopped
+    depends_on:
+      - local-model-runner
+
+  local-model-runner:
+    image: ${MODEL_RUNNER_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    container_name: llama_cpp_server
+    environment:
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+    
+    ports:
+      - "${MODEL_PORT:-8080}:${MODEL_PORT:-8080}"
+
+    volumes:
+      - ./models:/models
+
+    command: >
+      --model /models/${MODEL_FILE:-Qwen3.6-27B-MTP-GGUF-UD-Q4_K_XL.gguf}
+      --host 0.0.0.0
+      --port ${MODEL_PORT:-8080}
+      --n-gpu-layers ${GPU_LAYERS:-99}
+      --ctx-size ${CTX_SIZE:-32768}
+      ${LLAMA_ARGS:-}
+
+    # Comment out the entire 'deploy' section below if running on a CPU-only host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    networks:
+      - internal_network
+      - external_network
+      
+    restart: unless-stopped
+
+  agent-web-portal:
+    build:
+      context: .
+      dockerfile: Dockerfile.portal
+    image: local/agent-web-portal:latest
+    container_name: agent_web_portal
+    
+    ports:
+      - "7681:7681" # ttyd defaults to 7681 internally
+      
+    volumes:
+      # Mount the socket so the portal can execute commands on the host daemon
+      - /var/run/docker.sock:/var/run/docker.sock
+      
+    # Spawns the interactive Pi agent CLI inside pi_coding_agent each time a browser connects
+    command: ttyd -W -p 7681 docker exec -it pi_coding_agent pi
+    
+    depends_on:
+      - pi-agent
+      
+    networks:
+      - external_network
+    restart: unless-stopped
+
+  model-proxy:
+    image: alpine/socat:latest
+    container_name: model_proxy
+    # Forward port 8080 from internal network to the host's external model port (via host.docker.internal)
+    command: tcp-listen:8080,fork,reuseaddr tcp:host.docker.internal:${EXTERNAL_MODEL_PORT:-8080}
+    networks:
+      internal_network:
+        aliases:
+          - local-model-runner
+      external_network:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+
+networks:
+  internal_network:
+    driver: bridge
+    internal: true
+
+  external_network:
+    driver: bridge
