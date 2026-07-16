@@ -66,9 +66,13 @@ if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
     git checkout "${DEV_BRANCH}" -- .
     git add -A
 else
-    if ! git merge --squash "${DEV_BRANCH}"; then
-        echo "Error: Squash merge encountered conflicts. Please resolve them on '${RELEASE_BRANCH}'." >&2
-        exit 1
+    # Try merging with allow-unrelated-histories first.
+    # If it fails due to conflicts or unrelated histories, fall back to checking out the dev branch files directly.
+    if ! git merge --squash "${DEV_BRANCH}" --allow-unrelated-histories >/dev/null 2>&1; then
+        echo "Squash merge failed or has unrelated histories. Falling back to direct checkout..."
+        git reset --hard HEAD >/dev/null 2>&1 || true
+        git checkout "${DEV_BRANCH}" -- .
+        git add -A
     fi
 fi
 

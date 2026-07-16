@@ -1,9 +1,18 @@
-FROM tsl0922/ttyd:latest
+FROM tsl0922/ttyd:1.7.7@sha256:9a058c087bca6df456cb728514eafe778ea384369a622b3604c8b5256b67237d AS ttyd-source
 
-# Install the Docker CLI to execute commands via the mounted socket
+FROM node:26-trixie-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install the exact same tmux version as the agent container, plus tini
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    docker.io \
+    tmux \
+    tini \
     && rm -rf /var/lib/apt/lists/*
 
-# Expose the default ttyd port
+# Copy the statically-linked ttyd binary
+COPY --from=ttyd-source /usr/bin/ttyd /usr/bin/ttyd
+
 EXPOSE 7681
+
+ENTRYPOINT ["/usr/bin/tini", "--"]

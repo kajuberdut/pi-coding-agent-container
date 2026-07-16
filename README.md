@@ -50,8 +50,11 @@ To enforce security and isolation, the containerized agent has access to only tw
 ### Infrastructure Security & Isolation
 
 * **Network Isolation**: The agent container runs completely isolated on an air-gapped internal bridge network with no routing to the internet or the host's LAN.
+* **Inference Server Exposure**: The local model runner (`llama.cpp` server) publishes its port bound only to localhost/loopback (`127.0.0.1`) on the host.
+* **Supply Chain Security**: All Docker base images, third-party containers (`socat`, `ttyd`), and the default `llama.cpp` model runner are pinned to exact cryptographic SHA-256 digests rather than mutable tags. The `@earendil-works/pi-coding-agent` npm package is pinned to a specific release and installed with scripts ignored (`--ignore-scripts`) to prevent arbitrary build-time code execution from compromised upstream transitive dependencies. You can run `./manage.sh scan` at any time to execute a local security vulnerability audit of the container images via Trivy.
 * **Unprivileged Execution**: Processes in the agent container run under the `node` user (UID 1000). Host mapping prevents files written inside `workspace/` from becoming owned by `root`.
 * **Filesystem Restrictions**: The agent's root filesystem is mounted as read-only. Writable directories (`/tmp`, `/home/node/.config`, `/home/node/.npm`) are backed by non-executable memory storage (`tmpfs`).
+* **Web Portal Security**: The web portal container runs as a non-root user matching your host's UID/GID, has all system capabilities dropped (`cap_drop: [ALL]`), is mounted read-only with a temporary writable `/tmp` via `tmpfs`, has `no-new-privileges:true` set, and communicates with the agent exclusively over a `tmux` session shared via a Unix domain socket inside a named volume.
 
 ---
 
@@ -84,7 +87,7 @@ For details on supported model formats and recommended models, see [Model Files]
 
 ### ttyd Container
 
-A lightweight web-based terminal (`ttyd`) container that allows you to access and interact with the agent's workspace directly from a web browser. It mounts the host's Docker socket to execute commands inside the running agent container.
+A lightweight web-based terminal (`ttyd`) container that allows you to access and interact with the agent's workspace directly from a web browser by attaching to a shared `tmux` session in the agent container via a Unix socket inside a shared volume.
 
 ### Model Proxy Container
 
@@ -97,9 +100,11 @@ The `./manage.sh` wrapper script on the host automates workspace directory creat
 * **`./manage.sh build`**: Builds/rebuilds the agent and web portal containers.
 * **`./manage.sh update`**: Force-rebuilds the containers bypassing Docker cache.
 * **`./manage.sh run [args...]`**: Performs directory setup and launches the interactive agent container, overriding the background keep-alive.
+* **`./manage.sh up-runner`**: Starts only the local model runner container in the background (useful on a remote GPU hosting machine).
 * **`./manage.sh shell`**: Spawns a bash terminal inside a temporary instance of the agent container for sandbox experimentation.
 * **`./manage.sh clean`**: Tears down any active containers and shuts down the internal network bridges.
 * **`./manage.sh pick`**: Scans the `./models` directory for GGUF model files and allows you to interactively select one to update the configuration. *(Note: Python is required in order to use the pick functionality).*
+* **`./manage.sh scan`**: Runs a security vulnerability audit against all built and pulled images in the container stack (`agent`, `portal`, `socat`, and `llama.cpp`) using Trivy.
 
 ---
 
@@ -152,9 +157,9 @@ You can also pass arguments directly to the agent CLI:
 
 To run the agent with a browser-based web terminal:
 
-1. **Start the Stack**: Run the services in detached mode:
+1. **Start the Stack**: Run the services in detached mode (using the `portal` profile to enable the web terminal):
    ```bash
-   docker compose up -d
+   docker compose --profile portal up -d
    ```
 2. **Access the Portal**: Open your browser and navigate to `http://localhost:7681` to launch the interactive `pi` agent CLI inside the workspace.
 
@@ -204,17 +209,16 @@ The default host port is `8080`. If you need to use a different port (e.g., beca
 
 Run this command in a terminal on your client laptop to forward your desktop's model server port (normally `8080`) to the configured `EXTERNAL_MODEL_PORT` on your local machine.
 
-Use the `-g` flag to bind the forwarded port to all interfaces (GatewayPorts) so it is accessible to the Docker bridge:
+To prevent exposing your remote model runner to your entire local area network (LAN), do **not** use the `-g` (GatewayPorts) option. Instead, bind the forwarded port directly to the Docker bridge gateway address (`172.28.0.1`):
 ```bash
-ssh -g -L <EXTERNAL_MODEL_PORT>:localhost:8080 user@remote-desktop
+ssh -L 172.28.0.1:<EXTERNAL_MODEL_PORT>:localhost:8080 user@remote-desktop
 ```
-*(Alternatively, you can omit the `-g` flag by adding `GatewayPorts yes` under the corresponding `Host` block in your `~/.ssh/config` file to enable gateway ports automatically).*
 
 #### Step 2: Configure your Firewall (if UFW is active)
 
-By default, firewalls like UFW block incoming traffic from Docker bridge interfaces to the host. Since the `model-proxy` container must communicate with the host's forwarded port, you must explicitly allow the Docker subnet:
+By default, firewalls like UFW block incoming traffic from Docker bridge interfaces to the host. Since the `model-proxy` container must communicate with the host's forwarded port, you must explicitly allow the specific Docker compose network subnet (`172.28.0.0/24`) to connect to your host's forwarded port:
 ```bash
-sudo ufw allow from 172.16.0.0/12 to any port <EXTERNAL_MODEL_PORT>
+sudo ufw allow from 172.28.0.0/24 to any port <EXTERNAL_MODEL_PORT> proto tcp
 ```
 
 #### Step 3: Run the Services
@@ -231,6 +235,17 @@ sudo ufw allow from 172.16.0.0/12 to any port <EXTERNAL_MODEL_PORT>
   ```
   Open http://localhost:7681 in your browser to access the interactive web shell.
 
+#### Running the Model Runner on a Remote GPU Host
+
+If you are running the `llama.cpp` local inference runner on a remote GPU host machine (without the agent or proxy services), you can start only the runner using the following helper:
+```bash
+./manage.sh up-runner
+```
+Alternatively, you can start it via Docker Compose with the `runner` profile:
+```bash
+docker compose --profile runner up -d
+```
+
 ### Advanced Configurations
 
 #### Git Identity & Local Checkpoints
@@ -240,25 +255,6 @@ The agent utilizes Git locally inside the container to track its file changes, c
 If the host's `./workspace` directory is initialized as a Git repository (e.g., via `git init` or by cloning a repository into it), the containerized agent will automatically detect it and use the Git identity configured in your `.env` to sign and attribute its commits.
 
 Because the container runs in an air-gapped network, **remote Git operations (such as `git push`, `git pull`, or cloning external repositories) must be run from your host machine.**
-
-#### Pushing a Squashed History to GitHub
-
-If your upstream repository is a local Forgejo instance, but you also want to occasionally push a squashed version to GitHub (showing only a clean sequence of release commits on GitHub, never your granular development commits), you can use the included `squash-push.sh` helper script:
-
-1. **Initial Remote Setup**:
-   Add your GitHub repository as a remote named `github` on your host:
-   ```bash
-   git remote add github <github-repository-url>
-   ```
-
-2. **Execute the Script**:
-   Run the script from the root of the repository:
-   ```bash
-   ./squash-push.sh "Your Release Commit Message"
-   ```
-   *(If you omit the message argument, the script will prompt you for one).*
-
-The script automatically manages switching to a local `github-main` branch, performing a squash-merge from `main`, committing the changes as a single release commit, pushing to GitHub, and switching back to `main`.
 
 ---
 

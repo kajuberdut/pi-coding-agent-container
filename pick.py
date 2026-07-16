@@ -56,21 +56,23 @@ def main():
         except Exception as e:
             print(f"Warning: Could not read configurations from .env: {e}", file=sys.stderr)
 
-    # Try to fetch remote models from the localhost SSH tunnel port
+    # Try to fetch remote models from the SSH tunnel port
     remote_models = []
-    try:
-        import urllib.request
-        req = urllib.request.Request(f"http://localhost:{external_model_port}/v1/models")
-        with urllib.request.urlopen(req, timeout=1.5) as response:
-            data = json.loads(response.read().decode('utf-8'))
-            # Handle standard OpenAI /v1/models format
-            if "data" in data:
-                remote_models = [m["id"] for m in data["data"] if isinstance(m, dict) and "id" in m]
-            elif "models" in data:
-                remote_models = [m["name"] for m in data["models"] if isinstance(m, dict) and "name" in m]
-    except Exception:
-        # Remote model runner not active or unreachable
-        pass
+    for host in ("127.0.0.1", "172.28.0.1"):
+        try:
+            import urllib.request
+            req = urllib.request.Request(f"http://{host}:{external_model_port}/v1/models")
+            with urllib.request.urlopen(req, timeout=1.5) as response:
+                data = json.loads(response.read().decode('utf-8'))
+                # Handle standard OpenAI /v1/models format
+                if "data" in data:
+                    remote_models = [m["id"] for m in data["data"] if isinstance(m, dict) and "id" in m]
+                elif "models" in data:
+                    remote_models = [m["name"] for m in data["models"] if isinstance(m, dict) and "name" in m]
+                if remote_models:
+                    break
+        except Exception:
+            pass
 
     # Combine local and remote models into a single indexed list
     all_choices = []
@@ -84,10 +86,10 @@ def main():
             all_choices.append({"type": "remote", "name": m})
 
     if not all_choices:
-        print(f"\n\033[33mNo GGUF models found in the './models' directory, and no remote model server was detected on localhost:{external_model_port}.\033[0m")
+        print(f"\n\033[33mNo GGUF models found in the './models' directory, and no remote model server was detected on 172.28.0.1:{external_model_port} or localhost:{external_model_port}.\033[0m")
         print("\nTo download a model, you can place a .gguf file inside the './models/' directory.")
-        print("Alternatively, start your SSH tunnel to a remote model server first:")
-        print(f"  ssh -L {external_model_port}:localhost:8080 user@remote-machine")
+        print("Alternatively, start your SSH tunnel to a remote model server first (binding to the Docker bridge gateway):")
+        print(f"  ssh -L 172.28.0.1:{external_model_port}:localhost:8080 user@remote-machine")
         print()
         sys.exit(0)
 
@@ -104,7 +106,7 @@ def main():
     if remote_models:
         if local_models:
             print()
-        print(f" Remote Models (via localhost:{external_model_port}):")
+        print(f" Remote Models (via 172.28.0.1:{external_model_port} or localhost:{external_model_port}):")
         for idx, item in enumerate(all_choices[local_choices_count:], start=local_choices_count + 1):
             is_current = " \033[32m(currently selected)\033[0m" if item["name"] == current_model else ""
             print(f"  [{idx}] {item['name']}{is_current} \033[34m[Remote Proxy]\033[0m")
@@ -214,7 +216,7 @@ def main():
             if ufw_status == "active":
                 print("\n\033[33m[Notice] UFW firewall is active on your host.\033[0m")
                 print("If the agent container gets connection errors, you may need to run this on your host:")
-                print(f"  \033[36msudo ufw allow from 172.16.0.0/12 to any port {external_model_port}\033[0m")
+                print(f"  \033[36msudo ufw allow from 172.28.0.0/24 to any port {external_model_port} proto tcp\033[0m")
         except Exception:
             pass
         print()
