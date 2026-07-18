@@ -44,13 +44,14 @@ services:
 
     restart: unless-stopped
     depends_on:
-      - local-model-runner
+      local-model-runner:
+        condition: service_healthy
     profiles:
       - agent
       - all
 
   local-model-runner:
-    image: ${MODEL_RUNNER_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    image: ${MODEL_RUNNER_IMAGE}
     container_name: llama_cpp_server
     environment:
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
@@ -83,6 +84,12 @@ services:
       - external_network
       
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
     profiles:
       - runner
       - all
@@ -102,7 +109,7 @@ services:
       - no-new-privileges:true
     
     ports:
-      - "7681:7681" # ttyd defaults to 7681 internally
+      - "127.0.0.1:7681:7681" # ttyd defaults to 7681 internally
       
     # SECURITY NOTE: Do NOT mount the host's Docker socket (/var/run/docker.sock) here.
     # Docker socket access is root-equivalent on the host. The portal is decoupled
@@ -112,7 +119,7 @@ services:
       
     # Spawns ttyd and attaches to the tmux session inside the pi-agent container via the shared volume
     command: >
-      ttyd -W -p 7681
+      ttyd -W -c pi:${PORTAL_PASSWORD:?set PORTAL_PASSWORD in .env} -p 7681
       sh -c "while ! tmux -S /shared/tmux.sock has-session -t pi 2>/dev/null; do
         echo 'Waiting for Pi session to start...';
         sleep 1;
@@ -133,7 +140,7 @@ services:
       - all
 
   model-proxy:
-    image: alpine/socat:1.8.0-r3@sha256:d85531a29ef5ba99dfb4717485c239307e2902d522a1bc010992a2728c92cfad
+    image: ${MODEL_PROXY_IMAGE}
     container_name: model_proxy
     # Forward port 8080 from internal network to the host's external model port (via host.docker.internal)
     command: tcp-listen:8080,fork,reuseaddr tcp:host.docker.internal:${EXTERNAL_MODEL_PORT:-8080}

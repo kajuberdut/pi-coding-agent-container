@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.1.0] - 2026-07-18
+
+### Detailed Changes
+
+#### 1. Web Portal Security Hardening (Issue #4)
+* **Loopback Port Binding**: Configured the web portal container's exposed port in `docker-compose.yml` to bind strictly to loopback (`127.0.0.1:7681:7681`) to prevent unauthorized local area network (LAN) access to the session.
+* **Session Credentials Verification**: Configured `ttyd` to enforce password authentication (`pi` user) mapped to the `PORTAL_PASSWORD` environment variable.
+* **Fail-Safe Startup**: Used Docker Compose variable validation (`${PORTAL_PASSWORD:?set PORTAL_PASSWORD in .env}`) to prevent the portal container from starting if the password is unset or empty.
+* **Documentation**: Updated the README to guide users on establishing secure SSH tunnels for remote portal access, configure credentials, and warned about the security risks of exposing the portal directly to the LAN without TLS termination.
+
+#### 2. Vulnerability Scanner Scoping (Issue #5)
+* **Scoping Refactor**: Refactored the `scan)` case branch in `manage.sh` into `scan` and `trivy_scan` functions, correcting a bash syntax error where the `local` keyword was used outside of function scope. This ensures that the local model runner image scan is not aborted early by `set -e` and completes successfully.
+
+#### 3. Dedicated Pinned Versions Configuration (Issue #6)
+* **Dedicated Env File**: Created a dedicated `pinned-versions.env` file to track default pinned digests (`MODEL_RUNNER_IMAGE`, `MODEL_PROXY_IMAGE`, `TRIVY_IMAGE`) separately from the user's local configuration.
+* **Auto-Loading**: Modified `setup()` in `manage.sh` to automatically load `pinned-versions.env` before `.env`. This exports the default pinned images to Docker Compose while keeping the user's local `.env` clean (users can still override them in `.env` if desired).
+* **Decoupled Configuration**: Replaced all inline hardcoded digests in `docker-compose.yml` and `manage.sh` with these environment variables, establishing `pinned-versions.env` as the single source of truth for the stack's pinned image digests.
+* **Documentation**: Updated the README to guide users on using multiple `--env-file` flags when calling `docker compose` directly, with encouragement to use `manage.sh` to automate loading of pinned versions.
+
+#### 4. DNS Alias Collision Resolution (Issue #7)
+* **Conflict Resolution**: Centralized the stopping of conflicting containers via a new `stop_conflicting` helper in `manage.sh`. Integrated this guard across the `run`, `run-proxy`, `up-proxy`, `up-runner`, and `shell` case branches to stop any lingering `model-proxy` before local model execution. This prevents DNS alias collision coin-flips on the internal Docker bridge network.
+* **Auto Network Initialization**: Added a dedicated `init_network` helper in `manage.sh` that runs `docker compose up --no-start model-proxy` to guarantee that the isolated external network and bridge gateway interface exist on the host automatically on first run. This helper is called selectively only on container-startup branches (`run`, `run-proxy`, `up-proxy`, `up-runner`, and `shell`), preventing any containers from being created during administrative runs like `./manage.sh clean` or `./manage.sh build`.
+
+#### 5. Remote Tunnel Bridge Binding (Issue #8)
+* **First-run SSH Tunnel Failure**: Documented that the Docker network bridge interface (`172.28.0.1`) does not exist on a fresh clone prior to initialization, which causes first-run SSH binding commands to fail. Added notes in the README directing users to run `./manage.sh build` (or any other `./manage.sh` command) to trigger network initialization before establishing the SSH tunnel.
+
+#### 6. Model Loading Health Check
+* **Model Loading Synchronization**: Configured a fast-polling health check for the `local-model-runner` service and updated the `pi-agent` dependency to `condition: service_healthy`, preventing the agent from querying the server while the model is loading (resolving `503` errors).
+
+#### 7. Run Command Modes
+* **Default Print Mode & Interactive Flag**: Configured `./manage.sh run` and `run-proxy` to automatically default to print mode (`-p`) when prompt arguments are passed, and introduced a new `-i` flag to request an interactive session starting with an initial prompt.
+
+---
+
 ## [1.0.0] - 2026-07-15
 
 This release focuses on **Security Hardening, Sandbox Isolation, and Supply Chain Integrity** across the containerized execution environment.

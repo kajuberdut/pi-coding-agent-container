@@ -26,6 +26,7 @@ A containerized, secure, and isolated development environment for running the Pi
 - [Model Files](#model-files)
   - [Why GGUF?](#why-gguf)
   - [Recommended Models](#recommended-models)
+- [Screenshots](#screenshots)
 
 ---
 
@@ -54,7 +55,7 @@ To enforce security and isolation, the containerized agent has access to only tw
 * **Supply Chain Security**: All Docker base images, third-party containers (`socat`, `ttyd`), and the default `llama.cpp` model runner are pinned to exact cryptographic SHA-256 digests rather than mutable tags. The `@earendil-works/pi-coding-agent` npm package is pinned to a specific release and installed with scripts ignored (`--ignore-scripts`) to prevent arbitrary build-time code execution from compromised upstream transitive dependencies. You can run `./manage.sh scan` at any time to execute a local security vulnerability audit of the container images via Trivy.
 * **Unprivileged Execution**: Processes in the agent container run under the `node` user (UID 1000). Host mapping prevents files written inside `workspace/` from becoming owned by `root`.
 * **Filesystem Restrictions**: The agent's root filesystem is mounted as read-only. Writable directories (`/tmp`, `/home/node/.config`, `/home/node/.npm`) are backed by non-executable memory storage (`tmpfs`).
-* **Web Portal Security**: The web portal container runs as a non-root user matching your host's UID/GID, has all system capabilities dropped (`cap_drop: [ALL]`), is mounted read-only with a temporary writable `/tmp` via `tmpfs`, has `no-new-privileges:true` set, and communicates with the agent exclusively over a `tmux` session shared via a Unix domain socket inside a named volume.
+* **Web Portal Security**: The web portal container runs as a non-root user matching your host's UID/GID, has all system capabilities dropped (`cap_drop: [ALL]`), is mounted read-only with a temporary writable `/tmp` via `tmpfs`, has `no-new-privileges:true` set, requires password authentication (`pi` user with `PORTAL_PASSWORD`), publishes its port bound only to loopback (`127.0.0.1`), and communicates with the agent exclusively over a `tmux` session shared via a Unix domain socket inside a named volume.
 
 ---
 
@@ -157,11 +158,27 @@ You can also pass arguments directly to the agent CLI:
 
 To run the agent with a browser-based web terminal:
 
-1. **Start the Stack**: Run the services in detached mode (using the `portal` profile to enable the web terminal):
-   ```bash
-   docker compose --profile portal up -d
-   ```
-2. **Access the Portal**: Open your browser and navigate to `http://localhost:7681` to launch the interactive `pi` agent CLI inside the workspace.
+1. **Configure Credentials**: Ensure you have set a password for `PORTAL_PASSWORD` in your `.env` file. The web portal will refuse to start if this is left empty or unset.
+2. **Start the Stack**: It is highly recommended to use the `./manage.sh` wrapper script, as it automatically configures and exports the pinned image versions for you. If you choose to run `docker compose` directly, you must pass the environment files:
+   * **Via `manage.sh` (Recommended)**:
+     ```bash
+     ./manage.sh up-proxy
+     ```
+   * **Via direct `docker compose`**:
+     ```bash
+     docker compose --env-file pinned-versions.env --env-file .env --profile portal up -d
+     ```
+3. **Access the Portal**: Open your browser and navigate to `http://localhost:7681`. Log in using the username `pi` and your configured `PORTAL_PASSWORD` to launch the interactive `pi` agent CLI.
+
+#### Security & Remote Access
+
+* **Localhost Binding**: By default, the web portal is configured to bind only to the loopback interface (`127.0.0.1:7681`) on the host. This prevents other hosts on your local area network (LAN) from accessing the session.
+* **Remote Access via SSH Tunnel**: If you need to access the portal remotely, the simplest secure option is to use an SSH tunnel to securely forward the port:
+  ```bash
+  ssh -L 7681:localhost:7681 user@remote-host
+  ```
+  Then access the portal at `http://localhost:7681` on your local machine.
+* **LAN Exposure Warning**: Exposing the portal to the LAN requires deliberately changing the bind in `docker-compose.yml` (e.g. from `127.0.0.1:7681:7681` to `0.0.0.0:7681:7681`) and is not recommended without setting up TLS termination (e.g. Nginx, Caddy, or another reverse proxy with HTTPS) in front to protect credentials and session traffic.
 
 ### Local Inference Setup
 
@@ -214,6 +231,9 @@ To prevent exposing your remote model runner to your entire local area network (
 ssh -L 172.28.0.1:<EXTERNAL_MODEL_PORT>:localhost:8080 user@remote-desktop
 ```
 
+> [!NOTE]
+> On a fresh clone, the Docker network bridge interface (`172.28.0.1`) will not exist on your host yet. If the SSH command fails with `bind: Cannot assign requested address`, run `./manage.sh build` (or any other `./manage.sh` command) first to initialize the Docker networks and containers on your host.
+
 #### Step 2: Configure your Firewall (if UFW is active)
 
 By default, firewalls like UFW block incoming traffic from Docker bridge interfaces to the host. Since the `model-proxy` container must communicate with the host's forwarded port, you must explicitly allow the specific Docker compose network subnet (`172.28.0.0/24`) to connect to your host's forwarded port:
@@ -233,7 +253,7 @@ sudo ufw allow from 172.28.0.0/24 to any port <EXTERNAL_MODEL_PORT> proto tcp
   ```bash
   ./manage.sh up-proxy
   ```
-  Open http://localhost:7681 in your browser to access the interactive web shell.
+  Open http://localhost:7681 in your browser and log in with username `pi` and your configured `PORTAL_PASSWORD` to access the interactive web shell.
 
 #### Running the Model Runner on a Remote GPU Host
 
@@ -241,9 +261,9 @@ If you are running the `llama.cpp` local inference runner on a remote GPU host m
 ```bash
 ./manage.sh up-runner
 ```
-Alternatively, you can start it via Docker Compose with the `runner` profile:
+Alternatively, you can start it via Docker Compose (ensure you pass the environment files):
 ```bash
-docker compose --profile runner up -d
+docker compose --env-file pinned-versions.env --env-file .env --profile runner up -d
 ```
 
 ### Advanced Configurations
@@ -287,3 +307,25 @@ The list below shows the approximate file sizes for their `Q4_K_M` (4-bit quanti
 
 > [!TIP]
 > Ensure your system has enough combined RAM/VRAM to fit the selected GGUF file size, plus an additional 2–3 GB for context window overhead (KV cache) and general runtime overhead.
+
+---
+
+## Screenshots
+
+### Model Selection CLI (`./manage.sh pick`)
+
+Interactive CLI model selector showing local GGUF models and remote model proxy options:
+
+![Model Selection CLI](screenshots/pick.png)
+
+### Prompt Execution CLI (`./manage.sh run`)
+
+Running a single prompt non-interactively using the default print mode:
+
+![Prompt Execution CLI](screenshots/run.png)
+
+### Web Portal Workspace
+
+Interactive web-based terminal interface accessing the agent's workspace via a browser:
+
+![Web Portal Workspace](screenshots/web-portal.png)
