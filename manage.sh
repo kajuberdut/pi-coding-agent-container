@@ -28,6 +28,93 @@ setup() {
         source .env
         set +a
     fi
+
+    # Load active profile configuration if specified
+    if [ -n "${ACTIVE_PROFILE}" ]; then
+        local profile_path="profiles/${ACTIVE_PROFILE}.env"
+        if [ -f "$profile_path" ]; then
+            set -a
+            source "$profile_path"
+            set +a
+        else
+            echo "Warning: ACTIVE_PROFILE '${ACTIVE_PROFILE}' is configured, but '${profile_path}' does not exist." >&2
+        fi
+    fi
+
+    # Configure COMPOSE_FILE based on USE_GPU setting and OS
+    if [ "$USE_GPU" = "true" ] || [ "$USE_GPU" = "1" ]; then
+        if [ "$(uname)" = "Linux" ] || [ "$(uname)" = "Darwin" ]; then
+            export COMPOSE_FILE="docker-compose.yml:docker-compose.gpu.yml"
+        else
+            export COMPOSE_FILE="docker-compose.yml;docker-compose.gpu.yml"
+        fi
+    else
+        export COMPOSE_FILE="docker-compose.yml"
+    fi
+
+    # Set default MODEL_PROXY_HOST based on OS if not already specified
+    if [ -z "${MODEL_PROXY_HOST}" ]; then
+        if [ "$(uname)" = "Linux" ]; then
+            export MODEL_PROXY_HOST="172.28.0.1"
+        else
+            export MODEL_PROXY_HOST="host.docker.internal"
+        fi
+    fi
+}
+
+ensure_portal_password() {
+    # Check if PORTAL_PASSWORD is set and not empty
+    if [ -z "${PORTAL_PASSWORD}" ]; then
+        # If stdin is not a terminal, we cannot prompt interactively
+        if [ ! -t 0 ]; then
+            echo "Error: PORTAL_PASSWORD is not set in .env." >&2
+            echo "Please set PORTAL_PASSWORD in .env to run the web portal." >&2
+            exit 1
+        fi
+        
+        echo "The web portal requires a password to secure your session (username: pi)."
+        local pwd1 pwd2
+        while true; do
+            read -rsp "Enter new web portal password: " pwd1
+            echo ""
+            if [ -z "$pwd1" ]; then
+                echo "Password cannot be empty. Please try again." >&2
+                continue
+            fi
+            read -rsp "Confirm password: " pwd2
+            echo ""
+            if [ "$pwd1" != "$pwd2" ]; then
+                echo "Passwords do not match. Please try again." >&2
+                continue
+            fi
+            break
+        done
+        
+        # Save the password to .env file
+        python3 -c '
+import sys, re, shlex
+content = ""
+try:
+    with open(".env", "r") as f:
+        content = f.read()
+except FileNotFoundError:
+    pass
+
+pattern = r"^(PORTAL_PASSWORD\s*=).*$"
+replacement = f"PORTAL_PASSWORD={shlex.quote(sys.argv[1])}"
+
+new_content, count = re.subn(pattern, replacement, content, flags=re.MULTILINE)
+if count == 0:
+    new_content = content.rstrip() + f"\n{replacement}\n"
+
+with open(".env", "w") as f:
+    f.write(new_content)
+' "$pwd1"
+        
+        # Export it to the current shell environment
+        export PORTAL_PASSWORD="$pwd1"
+        echo "Password saved to .env and configured."
+    fi
 }
 
 init_network() {
@@ -85,6 +172,69 @@ check_external_port() {
     echo "Model server detected."
 }
 
+check_runner_health_and_logs() {
+    # Check if the container exists
+    if ! docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q '^llama_cpp_server$'; then
+        return 0
+    fi
+    
+    local is_pre_running="${1:-0}"
+    local status restart_count
+    
+    # If the container was already running, just do a single instantaneous health check
+    if [ "$is_pre_running" -eq 1 ]; then
+        status=$(docker inspect -f '{{.State.Status}}' llama_cpp_server 2>/dev/null || true)
+        if [ "$status" = "exited" ] || [ "$status" = "restarting" ] || [ "$status" = "dead" ]; then
+            echo "" >&2
+            echo "========================================================================" >&2
+            echo "ERROR: The local model runner (llama_cpp_server) is not running!" >&2
+            echo "Current Status: $status" >&2
+            echo "------------------------------------------------------------------------" >&2
+            echo "Recent container logs:" >&2
+            docker logs --tail 25 llama_cpp_server >&2
+            echo "========================================================================" >&2
+            echo "Please check your .env settings (e.g., GPU_LAYERS, MODEL_FILE, LLAMA_ARGS)." >&2
+            echo "========================================================================" >&2
+            return 1
+        fi
+        return 0
+    fi
+    
+    # If the container was newly started, poll for up to 6 seconds to capture early crash loops
+    local i
+    for i in {1..12}; do
+        status=$(docker inspect -f '{{.State.Status}}' llama_cpp_server 2>/dev/null || true)
+        restart_count=$(docker inspect -f '{{.RestartCount}}' llama_cpp_server 2>/dev/null || echo 0)
+        
+        if [ "$status" = "exited" ] || [ "$status" = "restarting" ] || [ "$status" = "dead" ] || [ "$restart_count" -gt 0 ]; then
+            echo "" >&2
+            echo "========================================================================" >&2
+            echo "ERROR: The local model runner (llama_cpp_server) is failing to start!" >&2
+            echo "Current Status: $status | Restart Count: $restart_count" >&2
+            echo "------------------------------------------------------------------------" >&2
+            echo "Recent container logs:" >&2
+            docker logs --tail 25 llama_cpp_server >&2
+            echo "========================================================================" >&2
+            echo "Please check your .env settings (e.g., GPU_LAYERS, MODEL_FILE, LLAMA_ARGS)." >&2
+            echo "========================================================================" >&2
+            return 1
+        fi
+        sleep 0.5
+    done
+    return 0
+}
+
+start_and_check_runner() {
+    local runner_running=0
+    if docker inspect -f '{{.State.Status}}' llama_cpp_server 2>/dev/null | grep -q "^running$"; then
+        runner_running=1
+    fi
+    
+    docker compose --progress quiet up -d local-model-runner
+    
+    check_runner_health_and_logs "$runner_running"
+}
+
 check_proxy_connectivity() {
     echo "Testing proxy connectivity to model runner from inside the container network..."
     if ! docker compose run --rm --no-deps --entrypoint python3 pi-agent -c "
@@ -105,6 +255,75 @@ except Exception as e:
         exit 1
     fi
     echo "Proxy connectivity verified successfully."
+}
+
+start_model_proxy() {
+    init_network
+    check_external_port
+    stop_conflicting "local-model-runner"
+    # Starts the model proxy container first to check connectivity
+    docker compose --progress quiet up -d model-proxy
+    check_proxy_connectivity
+}
+
+run_agent_container() {
+    local no_deps="$1"
+    shift
+    
+    local compose_flags=""
+    if [ ! -t 0 ]; then
+        compose_flags="-T"
+    fi
+    
+    local no_deps_flag=""
+    if [ "$no_deps" -eq 1 ]; then
+        no_deps_flag="--no-deps"
+    fi
+
+    local interactive=0
+    local clean_args=()
+    local has_mode_or_print=0
+
+    for arg in "$@"; do
+        if [ "$arg" = "-i" ]; then
+            interactive=1
+        else
+            clean_args+=("$arg")
+            if [[ "$arg" == "-p" || "$arg" == "--print" || "$arg" == "--mode" || "$arg" == "-h" || "$arg" == "--help" || "$arg" == "--version" ]]; then
+                has_mode_or_print=1
+            fi
+        fi
+    done
+
+    if [ ${#clean_args[@]} -gt 0 ]; then
+        if [ "$interactive" -eq 1 ]; then
+            docker compose run $no_deps_flag $compose_flags --entrypoint pi --rm pi-agent "${clean_args[@]}"
+        else
+            local use_spinner=0
+            if [ "$has_mode_or_print" -eq 0 ]; then
+                use_spinner=1
+            else
+                for arg in "${clean_args[@]}"; do
+                    if [[ "$arg" == "-p" || "$arg" == "--print" ]]; then
+                        use_spinner=1
+                        break
+                    fi
+                done
+            fi
+
+            if [ "$use_spinner" -eq 1 ]; then
+                if [ "$has_mode_or_print" -eq 0 ]; then
+                    run_with_spinner docker compose run $no_deps_flag --quiet $compose_flags --entrypoint pi --rm pi-agent -p "${clean_args[@]}"
+                else
+                    run_with_spinner docker compose run $no_deps_flag --quiet $compose_flags --entrypoint pi --rm pi-agent "${clean_args[@]}"
+                fi
+            else
+                docker compose run $no_deps_flag $compose_flags --entrypoint pi --rm pi-agent "${clean_args[@]}"
+            fi
+        fi
+    else
+        docker compose run $no_deps_flag $compose_flags --entrypoint pi --rm pi-agent
+    fi
 }
 
 trivy_scan() {
@@ -181,6 +400,93 @@ run_with_spinner() {
     return $exit_code
 }
 
+manage_profile() {
+    local target_profile="$1"
+    
+    if [ -z "$target_profile" ]; then
+        echo "Available profiles:"
+        if [ ! -d "profiles" ]; then
+            echo "  No profiles directory found."
+            return 0
+        fi
+        
+        # Load .env to get the active profile
+        local active=""
+        if [ -f .env ]; then
+            active=$(grep -E '^ACTIVE_PROFILE=' .env | cut -d'=' -f2- | tr -d '"'\'' ')
+        fi
+        
+        local has_profiles=0
+        for f in profiles/*.env; do
+            [ -e "$f" ] || continue
+            has_profiles=1
+            local name
+            name=$(basename "$f" .env)
+            if [ "$name" = "$active" ]; then
+                echo "  * $name (active)"
+            else
+                echo "    $name"
+            fi
+        done
+        
+        if [ $has_profiles -eq 0 ]; then
+            echo "  No profile files found in profiles/."
+        fi
+        return 0
+    fi
+    
+    if [ "$target_profile" = "clear" ] || [ "$target_profile" = "none" ] || [ "$target_profile" = "off" ]; then
+        # Clear ACTIVE_PROFILE in .env
+        python3 -c '
+import sys, re
+content = ""
+try:
+    with open(".env", "r") as f:
+        content = f.read()
+except FileNotFoundError:
+    pass
+
+pattern = r"^(ACTIVE_PROFILE\s*=).*$"
+new_content, count = re.subn(pattern, "ACTIVE_PROFILE=", content, flags=re.MULTILINE)
+
+with open(".env", "w") as f:
+    f.write(new_content)
+'
+        echo "Active profile cleared. Using default .env settings."
+        return 0
+    fi
+    
+    # Enable profile
+    local profile_file="profiles/${target_profile}.env"
+    if [ ! -f "$profile_file" ]; then
+        echo "Error: Profile '${target_profile}' not found in profiles/ directory." >&2
+        return 1
+    fi
+    
+    # Write ACTIVE_PROFILE to .env
+    python3 -c '
+import sys, re, shlex
+content = ""
+try:
+    with open(".env", "r") as f:
+        content = f.read()
+except FileNotFoundError:
+    pass
+
+pattern = r"^(ACTIVE_PROFILE\s*=).*$"
+replacement = f"ACTIVE_PROFILE={shlex.quote(sys.argv[1])}"
+
+new_content, count = re.subn(pattern, replacement, content, flags=re.MULTILINE)
+if count == 0:
+    new_content = content.rstrip() + f"\n{replacement}\n"
+
+with open(".env", "w") as f:
+    f.write(new_content)
+' "$target_profile"
+
+    echo "Profile '${target_profile}' is now active."
+}
+
 case "$1" in
     build)
         setup
@@ -195,125 +501,21 @@ case "$1" in
         init_network
         stop_conflicting "model-proxy"
         shift # Drop the "run" command from arguments
-
-        compose_flags=""
-        if [ ! -t 0 ]; then
-            compose_flags="-T"
+        if ! start_and_check_runner; then
+            exit 1
         fi
-
-        interactive=0
-        clean_args=()
-        has_mode_or_print=0
-
-        for arg in "$@"; do
-            if [ "$arg" = "-i" ]; then
-                interactive=1
-            else
-                clean_args+=("$arg")
-                if [[ "$arg" == "-p" || "$arg" == "--print" || "$arg" == "--mode" || "$arg" == "-h" || "$arg" == "--help" || "$arg" == "--version" ]]; then
-                    has_mode_or_print=1
-                fi
-            fi
-        done
-
-        if [ ${#clean_args[@]} -gt 0 ]; then
-            if [ "$interactive" -eq 1 ]; then
-                docker compose run $compose_flags --entrypoint pi --rm pi-agent "${clean_args[@]}"
-            else
-                use_spinner=0
-                if [ "$has_mode_or_print" -eq 0 ]; then
-                    use_spinner=1
-                else
-                    for arg in "${clean_args[@]}"; do
-                        if [[ "$arg" == "-p" || "$arg" == "--print" ]]; then
-                            use_spinner=1
-                            break
-                        fi
-                    done
-                fi
-
-                if [ "$use_spinner" -eq 1 ]; then
-                    if [ "$has_mode_or_print" -eq 0 ]; then
-                        run_with_spinner docker compose run --quiet $compose_flags --entrypoint pi --rm pi-agent -p "${clean_args[@]}"
-                    else
-                        run_with_spinner docker compose run --quiet $compose_flags --entrypoint pi --rm pi-agent "${clean_args[@]}"
-                    fi
-                else
-                    docker compose run $compose_flags --entrypoint pi --rm pi-agent "${clean_args[@]}"
-                fi
-            fi
-        else
-            docker compose run $compose_flags --entrypoint pi --rm pi-agent
-        fi
+        run_agent_container 0 "$@"
         ;;
     run-proxy)
         setup
-        init_network
-        check_external_port
+        start_model_proxy
         shift # Drop the "run-proxy" command from arguments
-        stop_conflicting "local-model-runner"
-        # Starts the model proxy container and runs the agent interactively
-        docker compose up -d model-proxy
-        check_proxy_connectivity
-
-        compose_flags=""
-        if [ ! -t 0 ]; then
-            compose_flags="-T"
-        fi
-
-        interactive=0
-        clean_args=()
-        has_mode_or_print=0
-
-        for arg in "$@"; do
-            if [ "$arg" = "-i" ]; then
-                interactive=1
-            else
-                clean_args+=("$arg")
-                if [[ "$arg" == "-p" || "$arg" == "--print" || "$arg" == "--mode" || "$arg" == "-h" || "$arg" == "--help" || "$arg" == "--version" ]]; then
-                    has_mode_or_print=1
-                fi
-            fi
-        done
-
-        if [ ${#clean_args[@]} -gt 0 ]; then
-            if [ "$interactive" -eq 1 ]; then
-                docker compose run --no-deps $compose_flags --entrypoint pi --rm pi-agent "${clean_args[@]}"
-            else
-                use_spinner=0
-                if [ "$has_mode_or_print" -eq 0 ]; then
-                    use_spinner=1
-                else
-                    for arg in "${clean_args[@]}"; do
-                        if [[ "$arg" == "-p" || "$arg" == "--print" ]]; then
-                            use_spinner=1
-                            break
-                        fi
-                    done
-                fi
-
-                if [ "$use_spinner" -eq 1 ]; then
-                    if [ "$has_mode_or_print" -eq 0 ]; then
-                        run_with_spinner docker compose run --no-deps --quiet $compose_flags --entrypoint pi --rm pi-agent -p "${clean_args[@]}"
-                    else
-                        run_with_spinner docker compose run --no-deps --quiet $compose_flags --entrypoint pi --rm pi-agent "${clean_args[@]}"
-                    fi
-                else
-                    docker compose run --no-deps $compose_flags --entrypoint pi --rm pi-agent "${clean_args[@]}"
-                fi
-            fi
-        else
-            docker compose run --no-deps $compose_flags --entrypoint pi --rm pi-agent
-        fi
+        run_agent_container 1 "$@"
         ;;
     up-proxy)
         setup
-        init_network
-        check_external_port
-        stop_conflicting "local-model-runner"
-        # Starts the model proxy container first to check connectivity
-        docker compose up -d model-proxy
-        check_proxy_connectivity
+        ensure_portal_password
+        start_model_proxy
         # Starts the agent and web portal in the background
         docker compose up --no-deps -d pi-agent agent-web-portal
         ;;
@@ -322,17 +524,27 @@ case "$1" in
         init_network
         stop_conflicting "model-proxy"
         # Starts only the local model runner in the background
-        docker compose up -d local-model-runner
+        if ! start_and_check_runner; then
+            exit 1
+        fi
         ;;
     shell)
         setup
         init_network
         stop_conflicting "model-proxy"
+        if ! start_and_check_runner; then
+            exit 1
+        fi
         docker compose run --entrypoint /bin/bash --rm pi-agent
         ;;
     clean)
         setup
         docker compose --profile all --profile proxy down --remove-orphans
+        ;;
+    profile)
+        setup
+        shift
+        manage_profile "$@"
         ;;
     pick)
         python3 pick.py
@@ -340,8 +552,11 @@ case "$1" in
     scan)
         scan
         ;;
+    test)
+        python3 -m unittest discover -s tests
+        ;;
     *)
-        echo "Usage: $0 {build|update|pick|run [args...]|run-proxy [args...]|up-proxy|up-runner|shell|clean|scan}"
+        echo "Usage: $0 {build|update|pick|profile [name|clear]|run [args...]|run-proxy [args...]|up-proxy|up-runner|shell|clean|scan|test}"
         echo ""
         echo "Options for run / run-proxy:"
         echo "  -i                           # Run interactively after processing initial prompt"

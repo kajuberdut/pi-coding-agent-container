@@ -8,3 +8,9 @@
 experiments
 dev
 github_token.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/

@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.1.1] - 2026-07-18
+
+### Detailed Changes
+
+#### 1. Fix Docker Compose Interpolation Error for PORTAL_PASSWORD
+* **Runtime Validation Refactor**: Replaced the strict, parse-time Docker Compose validation (`${PORTAL_PASSWORD:?set PORTAL_PASSWORD in .env}`) with runtime shell validation inside the portal container. This prevents administrative commands (like `./manage.sh clean` or `./manage.sh build`) from failing when `PORTAL_PASSWORD` is not configured in `.env`.
+* **Interactive Setup Helper**: Added a helper function to `manage.sh` that prompts the user interactively to configure and confirm the web portal password if it is blank or unset when running commands that start the portal (e.g., `./manage.sh up-proxy`). It securely writes the password to `.env` using Python to escape special characters.
+* **DRY Refactoring of `manage.sh`**: Extracted duplicate argument parsing and `docker compose run` logic into a reusable `run_agent_container` function. Centralized the sequence to stand up and verify model proxy connectivity into a `start_model_proxy` function, reducing duplication and improving maintainability.
+
+#### 2. Dependency Upgrades & Security Patches
+* **Alpine Socat Upgrade**: Updated the `MODEL_PROXY_IMAGE` (socat proxy container) to `alpine/socat:1.8.1.3` (with content digest pinning) to address the **CVE-2026-56123** heap-based buffer overflow vulnerability.
+* **Pi Coding Agent Upgrade**: Bumped the globally installed agent dependency from `0.80.7` to `0.80.10` in `Dockerfile.agent`.
+
+#### 3. Automated Test Suite
+* **Unit Testing Support**: Introduced a automated unit test suite inside [tests/test_manage.py](file:///home/giblesnot/code/pi-coding-agent-container/tests/test_manage.py). The test suite verifies setup directories/permissions, non-interactive password failures, interactive password setups (using pseudo-TTYs), and orchestrator targets (mocking `docker`, `docker compose`, and `curl`).
+* **Test Command Integration**: Integrated a new `test` target in [manage.sh](file:///home/giblesnot/code/pi-coding-agent-container/manage.sh) that allows running the entire test suite via `./manage.sh test`.
+* **Repository Cleanliness**: Updated [.gitignore](file:///home/giblesnot/code/pi-coding-agent-container/.gitignore) to exclude Python compilation artifacts (`.pyc`, `.pyo`, `.pyd`, `__pycache__/`) and local test runner caches (`.pytest_cache/`).
+
+#### 4. Dynamic SSH Tunnel Routing for Linux & Docker Desktop (Issue #9)
+* **Dynamic Host Gateway IP**: Replaced the hardcoded `host.docker.internal` routing in `model-proxy` with the `MODEL_PROXY_HOST` environment variable, defaulting to `host.docker.internal`.
+* **Dynamic OS Detection**: Configured `manage.sh` to auto-detect the operating system. On native Linux, it exports `MODEL_PROXY_HOST` as the custom bridge gateway IP `172.28.0.1`. On macOS/Windows, it falls back to `host.docker.internal`. This resolves connection failures on Linux when the SSH tunnel is bound strictly to the recommended secure gateway interface address instead of loopback or wildcards.
+
+#### 5. Early Model Runner Crash Diagnostics & Log Output
+* **Startup Status Polling**: Implemented a non-blocking startup polling check in `manage.sh` for commands that orchestrate local model execution (`run`, `up-runner`, `shell`).
+* **Instantaneous Crash Loop Interception**: If the `llama_cpp_server` container fails to start, goes into a `restarting` state, or increments its restart count, the CLI immediately aborts startup, prints the exit code/status, and outputs the last 25 lines of the container's logs to `stderr`. This gives immediate visibility into CUDA OOM errors, missing model files, or invalid command-line flags instead of silently hanging on the compose healthcheck wait.
+* **Silent Successful Progress Output**: Replaced direct shell output/redirection with the `docker compose --progress quiet` flag when launching the `local-model-runner` and `model-proxy` services. This suppresses successful progress status lines (`✔ Container Running`) on the terminal while preserving actual compose parsing or runtime errors.
+
+#### 6. Composable Configuration Profiles
+* **Profile Configuration Directory**: Created a `profiles/` directory to house model and hardware configuration sets (e.g. `qwen-27b-gpu.env`, `gemma-12b-gpu.env`, `gemma-12b-cpu.env`).
+* **Hardware Isomorphic Compose Integration**: Extracted the VRAM GPU resource reservation blocks out of the main [docker-compose.yml](file:///home/giblesnot/code/pi-coding-agent-container/docker-compose.yml) into a separate, composable [docker-compose.gpu.yml](file:///home/giblesnot/code/pi-coding-agent-container/docker-compose.gpu.yml) file.
+* **Dynamic Compose Merging**: Configured the orchestrator to automatically load files via the `COMPOSE_FILE` environment variable. If `USE_GPU=true` is set (either in a profile or `.env`), `manage.sh` dynamically appends the GPU override file using the host OS's native compose file path separator (`:` on Linux/macOS and `;` on Windows).
+* **CLI Profile Targets**: Added a `./manage.sh profile [name|clear]` case subcommand to list available configurations, highlight the active configuration, dynamically swap active profile settings by updating `ACTIVE_PROFILE` in `.env`, or revert to default settings.
+* **Expanded Verification Coverage**: Configured isolated unit tests inside [tests/test_manage.py](file:///home/giblesnot/code/pi-coding-agent-container/tests/test_manage.py) to simulate profiles setup, list, activate, clear, and error scenarios.
+
+---
+
 ## [1.1.0] - 2026-07-18
 
 ### Detailed Changes

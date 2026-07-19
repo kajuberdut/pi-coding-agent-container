@@ -2,6 +2,16 @@
 
 A containerized, secure, and isolated development environment for running the Pi coding agent (`@earendil-works/pi-coding-agent`).
 
+> [!IMPORTANT]
+> **Upcoming Change Notice (v2.0.0 Migration):**
+> We are planning to transition the repository orchestration from legacy Bash/Python scripts (`manage.sh` and `pick.py`) to a unified, standalone Python package (`pib`) built using [Typer](https://typer.tiangolo.com/) and managed by [uv](https://github.com/astral-sh/uv).
+> 
+> * **What's Changing:** The entrypoint shell scripts (`./manage.sh`) will be replaced by a single `pib` CLI tool.
+> * **Required Action:** Once v2.0.0 is merged, users will install `pib` globally via `uv` (`uv tool install git+...`).
+> * **New Benefits:** Support for native shell autocompletion (Bash/Zsh/Fish), cleaner command interfaces, and more robust subprocess execution.
+> 
+> For complete specifications, please refer to the design document: [version 2.md](file:///home/giblesnot/code/pi-coding-agent-container/version%202.md).
+
 ---
 
 ## Table of Contents
