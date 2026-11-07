@@ -4,6 +4,49 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.0.0] - 2026-11-07
+
+### Detailed Changes
+
+#### 1. Python CLI Migration (`pib`)
+* **Unified CLI Executable**: Replaced the legacy shell script (`manage.sh`) and standalone Python picker (`pick.py`) with a unified Python package named `pib` (`Pi Box`) built on top of the **Typer** framework.
+* **uv Package Management**: Packaged the CLI as a standard pyproject-compliant executable tool managed by **uv** to ensure clean dependency isolation, package installation caching, and shell autocomplete script generation.
+* **Unified Subcommand Router**: Mapped all legacy command targets to standard CLI commands (`pib build`, `pib run`, `pib run-proxy`, `pib up-proxy`, `pib up-runner`, `pib shell`, `pib clean`, `pib scan`, `pib profile`, and `pib test`).
+
+#### 2. Consolidated Configuration Wizard
+* **Consolidated Step-by-Step Prompt**: Merged model selection and hardware profile loading into a single interactive configure command (`pib configure` or alias `pib pick`).
+* **Interactive Model Filtering**: Prompts users to select a model family (Gemma, Qwen, Other), scans `./models/` recursively for compatible GGUF files, displays remote API models, and automatically recommends matching execution profile templates (e.g. GPU vs CPU, including `qwen-27b-instruct-gpu`) based on size.
+* **Profile Swapping**: Updates the `ACTIVE_PROFILE` and `MODEL_FILE` keys in `.env` automatically, loading profile variables dynamically on command execution.
+
+#### 3. Subprocess Execution & Test Suite Updates
+* **Interactive PTY Test Fixes**: Replaced the standard `/dev/tty` getpass prompt in `ensure_portal_password` with a custom stdin-friendly terminal echo blocker to prevent PTY setup hangs and test timeouts.
+* **Pythonic Compose Execution**: Decoupled compose composition from the host OS environment by dynamically constructing compose `-f` flag arguments, avoiding host-specific separators in the `COMPOSE_FILE` variable.
+* **Test Isolation & Coverage**: Updated [tests/test_manage.py](tests/test_manage.py) to copy package metadata (`pyproject.toml`, `pib/`, `README.md`) into the test sandbox and added unit tests for the `pib configure` wizard and `pib run` flag routing.
+
+#### 4. Legacy Integration & Backwards Compatibility
+* **Wrapper Delegator**: Replaced the legacy `manage.sh` script with a thin bash shell wrapper (`exec uv run pib "$@"`) to maintain complete backwards compatibility with existing pipelines.
+* **Cleanup**: Deleted the now redundant `pick.py` script.
+
+#### 5. Pi Coding Agent Upgrade (Pi 1.0+ Series)
+* **Package Upgrade**: Upgraded `@earendil-works/pi-coding-agent` in `Dockerfile.agent` from `0.80.10` to `1.3.0` (`--ignore-scripts`), unlocking Pi 1.0+ extension features including mid-conversation message triggers, virtual model routing, codemode, and nested tool calls.
+* **Container Environment Hardening**: Added `/home/node/.cache` tmpfs mount and directory creation to support jiti compilation caching under a read-only root filesystem, explicitly exported `PI_CODING_AGENT_DIR` and `TERM=xterm-256color`, and updated `pib run` to treat `-c`/`--continue` and `-r`/`--resume` as interactive session flags.
+
+#### 6. GVS5H Ledger-Based Multi-Agent Orchestrator
+* **Zero-Dependency Engine**: Extracted the pure multi-agent ledger orchestration engine from the GVS5H project into `.pi-data/agent/skills/multiagent/scripts/multiagent.py` using Python standard library only, completely stripping out benchmark suites, grading harnesses, and LaTeX artifacts.
+* **Shared Filesystem Ledger**: Implements the multi-agent state machine (Primary Planner, Ideation Worker, Primary Manager, Task Workers, and Cutoff Summarizer) coordinating over a shared workspace ledger (`plan.md`, `notes.md`, `tasks.json`, `solution.py`/`answer.md`, and `transcript.jsonl`).
+* **Ground-Truth Verification**: Replaced benchmark-specific assertions with a general `--test-cmd` flag (e.g. `pytest -q`), providing the Primary Manager with ground-truth execution feedback to automatically pivot away from failing approaches.
+* **Skill Specification**: Added `.pi-data/agent/skills/multiagent/SKILL.md` compliant with the Agent Skills specification so the agent can discover and invoke `/skill:multiagent`.
+
+#### 7. Asynchronous Execution & Mid-Conversation Wakeups
+* **Detached Background Execution**: Added `--bg`, `--status`, `--wait`, and `--stop` lifecycle controls to `multiagent.py`, allowing multi-agent jobs to execute detached from the user's interactive session.
+* **Pi 1.0+ Extension (`multiagent.ts`)**: Created `.pi-data/agent/extensions/multiagent.ts` registering both a model-callable `multiagent` tool (defaulting to `async: true`) and an interactive `/multiagent` TUI slash command.
+* **Automatic Session Resume**: The extension polls active background runs non-blockingly, streams iteration progress to the TUI status bar (`multiagent[<id>]: worker (2/10)`), and fires `pi.sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })` to automatically wake Pi up with the final artifact when the run finishes.
+
+#### 8. Repository Cleanliness & Git Tracking
+* **Track Bundled Skills & Extensions**: Updated `.gitignore` to track `.pi-data/agent/skills/multiagent/` and `.pi-data/agent/extensions/multiagent.ts` while preserving git-ignore rules for local session histories, credentials, and settings.
+
+---
+
 ## [1.1.1] - 2026-07-18
 
 ### Detailed Changes
@@ -18,9 +61,9 @@ All notable changes to this project will be documented in this file.
 * **Pi Coding Agent Upgrade**: Bumped the globally installed agent dependency from `0.80.7` to `0.80.10` in `Dockerfile.agent`.
 
 #### 3. Automated Test Suite
-* **Unit Testing Support**: Introduced a automated unit test suite inside [tests/test_manage.py](file:///home/giblesnot/code/pi-coding-agent-container/tests/test_manage.py). The test suite verifies setup directories/permissions, non-interactive password failures, interactive password setups (using pseudo-TTYs), and orchestrator targets (mocking `docker`, `docker compose`, and `curl`).
-* **Test Command Integration**: Integrated a new `test` target in [manage.sh](file:///home/giblesnot/code/pi-coding-agent-container/manage.sh) that allows running the entire test suite via `./manage.sh test`.
-* **Repository Cleanliness**: Updated [.gitignore](file:///home/giblesnot/code/pi-coding-agent-container/.gitignore) to exclude Python compilation artifacts (`.pyc`, `.pyo`, `.pyd`, `__pycache__/`) and local test runner caches (`.pytest_cache/`).
+* **Unit Testing Support**: Introduced a automated unit test suite inside [tests/test_manage.py](tests/test_manage.py). The test suite verifies setup directories/permissions, non-interactive password failures, interactive password setups (using pseudo-TTYs), and orchestrator targets (mocking `docker`, `docker compose`, and `curl`).
+* **Test Command Integration**: Integrated a new `test` target in [manage.sh](manage.sh) that allows running the entire test suite via `./manage.sh test`.
+* **Repository Cleanliness**: Updated [.gitignore](.gitignore) to exclude Python compilation artifacts (`.pyc`, `.pyo`, `.pyd`, `__pycache__/`) and local test runner caches (`.pytest_cache/`).
 
 #### 4. Dynamic SSH Tunnel Routing for Linux & Docker Desktop (Issue #9)
 * **Dynamic Host Gateway IP**: Replaced the hardcoded `host.docker.internal` routing in `model-proxy` with the `MODEL_PROXY_HOST` environment variable, defaulting to `host.docker.internal`.
@@ -33,10 +76,10 @@ All notable changes to this project will be documented in this file.
 
 #### 6. Composable Configuration Profiles
 * **Profile Configuration Directory**: Created a `profiles/` directory to house model and hardware configuration sets (e.g. `qwen-27b-gpu.env`, `gemma-12b-gpu.env`, `gemma-12b-cpu.env`).
-* **Hardware Isomorphic Compose Integration**: Extracted the VRAM GPU resource reservation blocks out of the main [docker-compose.yml](file:///home/giblesnot/code/pi-coding-agent-container/docker-compose.yml) into a separate, composable [docker-compose.gpu.yml](file:///home/giblesnot/code/pi-coding-agent-container/docker-compose.gpu.yml) file.
+* **Hardware Isomorphic Compose Integration**: Extracted the VRAM GPU resource reservation blocks out of the main [docker-compose.yml](docker-compose.yml) into a separate, composable [docker-compose.gpu.yml](docker-compose.gpu.yml) file.
 * **Dynamic Compose Merging**: Configured the orchestrator to automatically load files via the `COMPOSE_FILE` environment variable. If `USE_GPU=true` is set (either in a profile or `.env`), `manage.sh` dynamically appends the GPU override file using the host OS's native compose file path separator (`:` on Linux/macOS and `;` on Windows).
 * **CLI Profile Targets**: Added a `./manage.sh profile [name|clear]` case subcommand to list available configurations, highlight the active configuration, dynamically swap active profile settings by updating `ACTIVE_PROFILE` in `.env`, or revert to default settings.
-* **Expanded Verification Coverage**: Configured isolated unit tests inside [tests/test_manage.py](file:///home/giblesnot/code/pi-coding-agent-container/tests/test_manage.py) to simulate profiles setup, list, activate, clear, and error scenarios.
+* **Expanded Verification Coverage**: Configured isolated unit tests inside [tests/test_manage.py](tests/test_manage.py) to simulate profiles setup, list, activate, clear, and error scenarios.
 
 ---
 

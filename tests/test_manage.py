@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import stat
+import json
 
 class TestManageScript(unittest.TestCase):
     def setUp(self):
@@ -22,6 +23,9 @@ class TestManageScript(unittest.TestCase):
         shutil.copy(self.script_path, os.path.join(self.test_dir, "manage.sh"))
         shutil.copy(self.env_example_path, os.path.join(self.test_dir, ".env.example"))
         shutil.copy(self.pinned_versions_path, os.path.join(self.test_dir, "pinned-versions.env"))
+        shutil.copy(os.path.abspath("pyproject.toml"), os.path.join(self.test_dir, "pyproject.toml"))
+        shutil.copy(os.path.abspath("README.md"), os.path.join(self.test_dir, "README.md"))
+        shutil.copytree(os.path.abspath("pib"), os.path.join(self.test_dir, "pib"))
         
         self.profiles_src_dir = os.path.abspath("profiles")
         if os.path.exists(self.profiles_src_dir):
@@ -58,6 +62,7 @@ if "-w" in sys.argv:
         self.env = os.environ.copy()
         # Prepend mock bin to PATH
         self.env["PATH"] = self.bin_dir + os.pathsep + self.env["PATH"]
+        self.env["PIB_TESTING"] = "1"
         
     def tearDown(self):
         shutil.rmtree(self.test_dir)
@@ -155,7 +160,7 @@ if "-w" in sys.argv:
         # Verify docker-compose commands run
         calls = self.get_docker_calls()
         self.assertTrue(any("docker compose" in c and "up -d" in c and "model-proxy" in c for c in calls))
-        self.assertTrue(any("docker compose up --no-deps -d pi-agent agent-web-portal" in c for c in calls))
+        self.assertTrue(any("docker compose" in c and "up --no-deps -d pi-agent agent-web-portal" in c for c in calls))
 
     def test_portal_password_interactive_prompt(self):
         """
@@ -213,7 +218,7 @@ if "-w" in sys.argv:
         self.assertEqual(res.returncode, 0)
         calls = self.get_docker_calls()
         # Verify it runs down with all/proxy profiles
-        self.assertTrue(any("docker compose --profile all --profile proxy down --remove-orphans" in c for c in calls))
+        self.assertTrue(any("docker compose" in c and "--profile all --profile proxy down --remove-orphans" in c for c in calls))
 
     def test_build_command(self):
         """
@@ -225,7 +230,7 @@ if "-w" in sys.argv:
         res = self.run_manage(["build"])
         self.assertEqual(res.returncode, 0)
         calls = self.get_docker_calls()
-        self.assertTrue(any("docker compose --profile all build" in c for c in calls))
+        self.assertTrue(any("docker compose" in c and "--profile all build" in c for c in calls))
 
     def test_up_runner_command(self):
         """
@@ -249,7 +254,7 @@ if "-w" in sys.argv:
         res = self.run_manage(["shell"])
         self.assertEqual(res.returncode, 0)
         calls = self.get_docker_calls()
-        self.assertTrue(any("docker compose run --entrypoint /bin/bash --rm pi-agent" in c for c in calls))
+        self.assertTrue(any("docker compose" in c and "run --entrypoint /bin/bash --rm pi-agent" in c for c in calls))
 
     def test_profile_commands(self):
         """
@@ -274,6 +279,18 @@ if "-w" in sys.argv:
             env_content = f.read()
         self.assertIn("ACTIVE_PROFILE=gemma-12b-cpu", env_content)
         
+        # Verify agent config was updated
+        models_json_path = os.path.join(self.test_dir, ".pi-data", "agent", "models.json")
+        settings_json_path = os.path.join(self.test_dir, ".pi-data", "agent", "settings.json")
+        self.assertTrue(os.path.exists(models_json_path))
+        self.assertTrue(os.path.exists(settings_json_path))
+        with open(models_json_path, "r") as f:
+            models_data = json.load(f)
+        self.assertEqual(models_data["providers"]["llama-cpp"]["models"][0]["id"], "gemma-4-12b-it-Q4_K_M.gguf")
+        with open(settings_json_path, "r") as f:
+            settings_data = json.load(f)
+        self.assertEqual(settings_data["defaultModel"], "gemma-4-12b-it-Q4_K_M.gguf")
+        
         # 3. Test listing again shows active profile
         res = self.run_manage(["profile"])
         self.assertEqual(res.returncode, 0)
@@ -294,6 +311,68 @@ if "-w" in sys.argv:
             env_content = f.read()
         self.assertIn("ACTIVE_PROFILE=", env_content)
         self.assertNotIn("ACTIVE_PROFILE=gemma-12b-cpu", env_content)
+        
+        # Verify agent config fell back to the base model in .env
+        with open(settings_json_path, "r") as f:
+            settings_data = json.load(f)
+        self.assertEqual(settings_data["defaultModel"], "Qwen3.6-27B-MTP-GGUF-UD-Q4_K_XL.gguf")
+
+    def test_configure_wizard(self):
+        """
+        What is tested: The 3-step interactive configuration wizard (`pib configure`).
+        What setup is done: A dummy GGUF file is created in models/ and inputs are piped via stdin.
+        What pass/fail criteria is evaluated: Verifies that MODEL_FILE, ACTIVE_PROFILE, models.json, and settings.json are updated.
+        What cleanup is done: Temporary directory structure is entirely deleted.
+        """
+        os.makedirs(self.models_dir, exist_ok=True)
+        dummy_model = os.path.join(self.models_dir, "gemma-4-12b-it-Q4_K_M.gguf")
+        with open(dummy_model, "w") as f:
+            f.write("dummy")
+
+        # Step 1: [1] Gemma
+        # Step 2: [1] gemma-4-12b-it-Q4_K_M.gguf
+        # Step 3: [1] gemma-12b-cpu
+        res = self.run_manage(["configure"], stdin="1\n1\n1\n")
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("Successfully updated configuration!", res.stdout)
+
+        env_path = os.path.join(self.test_dir, ".env")
+        with open(env_path, "r") as f:
+            env_content = f.read()
+        self.assertIn("MODEL_FILE=gemma-4-12b-it-Q4_K_M.gguf", env_content)
+        self.assertIn("ACTIVE_PROFILE=gemma-12b-cpu", env_content)
+
+        settings_json_path = os.path.join(self.test_dir, ".pi-data", "agent", "settings.json")
+        with open(settings_json_path, "r") as f:
+            settings_data = json.load(f)
+        self.assertEqual(settings_data["defaultModel"], "gemma-4-12b-it-Q4_K_M.gguf")
+
+    def test_run_flags_routing(self):
+        """
+        What is tested: Argument routing for `pib run` (print mode vs interactive `-i` and session resume `-c`/`-r`).
+        What setup is done: Isolated test environment with mock docker binary.
+        What pass/fail criteria is evaluated: Verifies `-p` is injected for plain prompts, `-i` is stripped for interactive runs, and `-c` runs without `-p`.
+        What cleanup is done: Temporary directory structure is entirely deleted.
+        """
+        # 1. Plain prompt -> injects -p
+        res = self.run_manage(["run", "Hello world"])
+        self.assertEqual(res.returncode, 0)
+        calls = self.get_docker_calls()
+        self.assertTrue(any("--entrypoint pi --rm pi-agent -p Hello world" in c for c in calls))
+
+        # 2. Interactive -i -> strips -i and does not inject -p
+        os.remove(self.docker_log)
+        res = self.run_manage(["run", "-i", "Hello interactive"])
+        self.assertEqual(res.returncode, 0)
+        calls = self.get_docker_calls()
+        self.assertTrue(any("--entrypoint pi --rm pi-agent Hello interactive" in c for c in calls))
+
+        # 3. Continue session -c -> treated as interactive, keeps -c, does not inject -p
+        os.remove(self.docker_log)
+        res = self.run_manage(["run", "-c"])
+        self.assertEqual(res.returncode, 0)
+        calls = self.get_docker_calls()
+        self.assertTrue(any("--entrypoint pi --rm pi-agent -c" in c for c in calls))
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,14 @@
 /.pi-data/*
 !/.pi-data/.gitkeep
+!/.pi-data/agent/
+/.pi-data/agent/*
+!/.pi-data/agent/skills/
+/.pi-data/agent/skills/*
+!/.pi-data/agent/skills/multiagent/
+!/.pi-data/agent/skills/multiagent/**
+!/.pi-data/agent/extensions/
+/.pi-data/agent/extensions/*
+!/.pi-data/agent/extensions/multiagent.ts
 /workspace/*
 !/workspace/.gitkeep
 /models/*
@@ -8,8 +17,12 @@
 experiments
 dev
 github_token.txt
+AGENTS.md
+squash-push.sh
+extra_readme.md
 
 # Python
+.venv/
 __pycache__/
 *.py[cod]
 *$py.class
